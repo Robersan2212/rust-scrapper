@@ -1,0 +1,14 @@
+[package]
+name = "rust-scrapper"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+reqwest = { version = "0.11", features = ["blocking"] }
+scraper = "0.18.1"
+csv = "1.3"
+clap = "3.2.25"
+rand = "0.8.5"
+regex = "1.10.2"
+log = "0.4.20"
+env_logger = "0.10.1"
