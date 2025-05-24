@@ -22,6 +22,8 @@ As a Software Engineer, I intend to learn low-level programming, and a viable wa
 - [Rust Playground](https://play.rust-lang.org/?version=stable&mode=debug&edition=2024)
 - [Rust Community](https://www.rust-lang.org/community)
 - [Rust Reditt](https://www.reddit.com/r/rust/)
+- [Rust Web Scrapping](https://www.zenrows.com/blog/rust-web-scraping#get-target-webpage)
+- [Web Scrapping in Rust with Reqwest](https://www.scrapingbee.com/blog/web-scraping-rust/)
 
 # Future Work
 
