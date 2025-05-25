@@ -1,7 +1,7 @@
 # Overview
 As a Software Engineer, I intend to learn low-level programming, and a viable way I found was through the Rust programming language. This software is a web scraping tool that uses CSS selectors to scrape data and save it to a CSV file. This program was useful for learning the principles of Rust such as: variables, expressions, conditionals, loops, and functions. I intend to scale this scraper for JavaScript-heavy websites.
 
-[Software Demo Video](http://youtube.link.goes.here)
+[Software Demo Video](https://www.youtube.com/watch?v=GSnff7N83wo)
 
 # Development Environment
 
