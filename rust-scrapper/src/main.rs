@@ -1,152 +1,137 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::error::Error;
-use std::io::{self, Write};
 use std::fs::File;
+use clap::Parser;
 use reqwest::blocking::Client;
 use scraper::{Html, Selector};
 use csv::Writer;
 use regex::Regex;
-// HashSet is actually used in the deduplicate_data function
-use std::collections::HashSet;
 
-// Define a struct to store scraped data
 struct ScrapedData {
     selector_name: String,
     values: Vec<String>,
 }
 
-// Removed the unused Product struct
+/// Fast, non-interactive web scraper. Supports multiple URLs and repeatable CSS selectors.
+#[derive(Parser, Debug)]
+#[clap(author, version, about, long_about = None)]
+struct Args {
+    /// One or more URLs to scrape (results merged into one CSV)
+    #[clap(required = true)]
+    urls: Vec<String>,
+
+    /// Selector in "name:css_selector" format. Repeat for each element.
+    /// Example: --selector "links:a.nav" --selector "hovered:a:hover"
+    #[clap(short, long = "selector", required = true)]
+    selectors: Vec<String>,
+
+    /// Enable pagination (appends ?page=N or &page=N to each URL)
+    #[clap(short, long)]
+    paginate: bool,
+
+    /// Max pages per URL when --paginate is active
+    #[clap(long, default_value = "10")]
+    max_pages: usize,
+
+    /// Remove duplicate rows from results
+    #[clap(short, long)]
+    deduplicate: bool,
+
+    /// Output CSV filename
+    #[clap(short, long, default_value = "scraped_data.csv")]
+    output: String,
+
+    /// Mark as JavaScript-heavy site (accepted for completeness; no effect)
+    #[clap(long)]
+    js_heavy: bool,
+}
+
+fn parse_selector(raw: &str) -> Result<(String, String), Box<dyn Error>> {
+    let mut parts = raw.splitn(2, ':');
+    let name = parts
+        .next()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| format!("Selector '{}' has an empty name before the colon", raw))?
+        .trim()
+        .to_string();
+    let selector = parts
+        .next()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| format!(
+            "Selector '{}' is missing a CSS selector after the colon. Expected: name:css_selector",
+            raw
+        ))?
+        .trim()
+        .to_string();
+    Ok((name, selector))
+}
 
 fn main() -> Result<(), Box<dyn Error>> {
-    println!("Web Scraper in Rust");
-    println!("---------------------");
+    env_logger::init();
+    let args = Args::parse();
 
-    // Get a random user agent
-    let user_agent = get_random_user_agent();
-
-    // Create HTTP client with custom user agent
-    let client = Client::builder()
-        .user_agent(user_agent)
-        .build()?;
-
-    // Get URL from user
-    let url = get_user_input("Enter the URL to scrape: ")?;
-
-    // Ask if pagination is needed
-    let use_pagination = get_user_input("Do you want to use pagination? (y/n): ")?.to_lowercase();
-    let max_pages = if use_pagination == "y" {
-        get_user_input("Enter maximum number of pages to scrape: ")?.parse::<usize>()?
-    } else {
-        1
-    };
-
-    // Ask if the site is JavaScript-heavy
-    let js_heavy = get_user_input("Is this a JavaScript-heavy site? (y/n): ")?.to_lowercase();
-    let _is_js_heavy = js_heavy == "y"; 
-
-    // Get selectors from user
     let mut selectors: HashMap<String, String> = HashMap::new();
-    let num_selectors = get_user_input("How many elements do you want to scrape? ")?.parse::<usize>()?;
-
-    // Loop to collect multiple selectors
-    for i in 1..=num_selectors {
-        let selector_name = get_user_input(&format!("Enter name for selector {}: ", i))?;
-        let selector_value = get_user_input(&format!("Enter CSS selector {}: ", i))?;
-        selectors.insert(selector_name, selector_value);
+    for raw in &args.selectors {
+        let (name, css) = parse_selector(raw)?;
+        selectors.insert(name, css);
     }
 
-    // Initialize the vector that will store all scraped data
+    let client = Client::builder()
+        .user_agent(get_random_user_agent())
+        .build()?;
+
+    let max_pages = if args.paginate { args.max_pages } else { 1 };
     let mut all_data: Vec<ScrapedData> = Vec::new();
 
-    // Scrape with pagination if requested
-    for page_num in 1..=max_pages {
-        let page_url = if page_num == 1 {
-            url.clone()
-        } else {
-            // Basic pagination pattern - modify as needed for specific sites
-            if url.contains('?') {
+    for url in &args.urls {
+        println!("--- Scraping URL: {} ---", url);
+        for page_num in 1..=max_pages {
+            let page_url = if page_num == 1 {
+                url.clone()
+            } else if url.contains('?') {
                 format!("{}&page={}", url, page_num)
             } else {
                 format!("{}?page={}", url, page_num)
+            };
+
+            println!("Scraping page {} of {}: {}", page_num, max_pages, page_url);
+            let html_content = fetch_html_with_retry(&client, &page_url, 3)?;
+            let document = Html::parse_document(&html_content);
+            let page_data = scrape_data(&document, &selectors)?;
+
+            if page_data.is_empty() {
+                println!("No data found on page {}. Stopping pagination.", page_num);
+                break;
             }
-        };
 
-        println!("Scraping page {} of {}: {}", page_num, max_pages, page_url);
+            merge_scraped_data(&mut all_data, page_data);
 
-        // Fetch the HTML content with retry logic
-        let html_content = fetch_html_with_retry(&client, &page_url, 3)?;
-
-        // Parse the HTML document
-        let document = Html::parse_document(&html_content);
-
-        // Scrape the data using the selectors
-        let page_data = scrape_data(&document, &selectors)?;
-
-        // If no data was found, we've likely reached the end of pagination
-        if page_data.is_empty() {
-            println!("No data found on page {}. Stopping pagination.", page_num);
-            break;
-        }
-
-        // Add the page data to our collection
-        all_data.extend(page_data);
-
-        // Be nice to the server - add a small delay between requests
-        if page_num < max_pages {
-            println!("Waiting before next request...");
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            if page_num < max_pages {
+                println!("Waiting before next request...");
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
         }
     }
 
-    // Deduplicate data if requested
-    let deduplicate = get_user_input("Do you want to remove duplicate entries? (y/n): ")?.to_lowercase();
-    let final_data = if deduplicate == "y" {
+    let final_data = if args.deduplicate {
         deduplicate_data(all_data)
     } else {
         all_data
     };
 
-    // Ask for output filename
-    let output_file = get_user_input("Enter output filename (default: scraped_data.csv): ")?;
-    let output_file = if output_file.trim().is_empty() {
-        "scraped_data.csv".to_string()
-    } else {
-        output_file
-    };
-
-    // Save the data to CSV
-    save_to_csv(&final_data, &output_file)?;
-    println!("Scraping completed successfully! Data saved to '{}'", output_file);
-
+    save_to_csv(&final_data, &args.output)?;
+    println!("Scraping completed successfully! Data saved to '{}'", args.output);
     Ok(())
 }
 
-// Function to get user input (returns ownership of the String)
-fn get_user_input(prompt: &str) -> Result<String, Box<dyn Error>> {
-    print!("{}", prompt);
-    io::stdout().flush()?;
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-
-    // Remove trailing newline
-    if input.ends_with('\n') {
-        input.pop();
-    }
-    if input.ends_with('\r') {
-        input.pop();
-    }
-
-    Ok(input)
-}
-
-// Function to fetch HTML content with retry logic
 fn fetch_html_with_retry(client: &Client, url: &str, max_retries: usize) -> Result<String, Box<dyn Error>> {
     let mut attempts = 0;
     let mut last_error = None;
 
     while attempts < max_retries {
         println!("Fetching HTML from {}... (attempt {}/{})", url, attempts + 1, max_retries);
-        
+
         match client.get(url).send() {
             Ok(response) => {
                 if response.status().is_success() {
@@ -174,47 +159,34 @@ fn fetch_html_with_retry(client: &Client, url: &str, max_retries: usize) -> Resu
     Err(last_error.unwrap_or_else(|| "Maximum retries exceeded".into()))
 }
 
-// Function to scrape data using selectors
 fn scrape_data(document: &Html, selectors: &HashMap<String, String>) -> Result<Vec<ScrapedData>, Box<dyn Error>> {
     let mut result: Vec<ScrapedData> = Vec::new();
 
-    // Iterate through each selector
     for (selector_name, selector_value) in selectors {
-        // Parse the selector
         let selector = match Selector::parse(selector_value) {
             Ok(sel) => sel,
             Err(_) => return Err(format!("Invalid selector: {}", selector_value).into()),
         };
 
-        // Select elements and extract text
         let mut values: Vec<String> = Vec::new();
 
-        // Loop through all matching elements
         for element in document.select(&selector) {
-            // Extract text content
             let text = element.text().collect::<Vec<_>>().join(" ").trim().to_string();
-
-            // Clean the text
             let cleaned_text = clean_text(&text);
 
-            // If text is not empty, add it to values
             if !cleaned_text.is_empty() {
                 values.push(cleaned_text);
             } else if let Some(href) = element.value().attr("href") {
-                // If text is empty but element has href attribute, use that
                 values.push(href.to_string());
             }
         }
 
-        // Get the length before moving values
         let values_len = values.len();
 
-        // Only add valid data
         if !values.is_empty() {
-            // Create ScrapedData struct and add to result
             result.push(ScrapedData {
                 selector_name: selector_name.clone(),
-                values, // values is moved here
+                values,
             });
             println!("Found {} elements matching selector '{}'", values_len, selector_name);
         } else {
@@ -225,50 +197,33 @@ fn scrape_data(document: &Html, selectors: &HashMap<String, String>) -> Result<V
     Ok(result)
 }
 
-// Save data to CSV
 fn save_to_csv(data: &[ScrapedData], filename: &str) -> Result<(), Box<dyn Error>> {
-    // Create CSV file
     let file = File::create(filename)?;
     let mut writer = Writer::from_writer(file);
 
-    // Determine the maximum number of values across all selectors
     let max_values = data.iter().map(|d| d.values.len()).max().unwrap_or(0);
 
-    // Write header row
-    let mut headers: Vec<String> = Vec::new();
-    for scraped_data in data {
-        headers.push(scraped_data.selector_name.clone());
-    }
+    let headers: Vec<String> = data.iter().map(|d| d.selector_name.clone()).collect();
     writer.write_record(&headers)?;
 
-    // Write data rows
     for i in 0..max_values {
-        let mut row: Vec<String> = Vec::new();
-        for scraped_data in data {
-            if i < scraped_data.values.len() {
-                row.push(scraped_data.values[i].clone());
-            } else {
-                row.push(String::new());
-            }
-        }
+        let row: Vec<String> = data
+            .iter()
+            .map(|d| d.values.get(i).cloned().unwrap_or_default())
+            .collect();
         writer.write_record(&row)?;
     }
 
-    // Flush and close the writer
     writer.flush()?;
     Ok(())
 }
 
-// Clean text
 fn clean_text(text: &str) -> String {
-    // Remove extra whitespace
     let cleaned = text.trim().to_string();
-    // Replace multiple spaces with a single space
     let re = Regex::new(r"\s+").unwrap();
     re.replace_all(&cleaned, " ").to_string()
 }
 
-// Get a random user agent
 fn get_random_user_agent() -> &'static str {
     let user_agents = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
@@ -286,22 +241,18 @@ fn get_random_user_agent() -> &'static str {
     user_agents[random_index]
 }
 
-// Function to deduplicate data
 fn deduplicate_data(data: Vec<ScrapedData>) -> Vec<ScrapedData> {
     let mut result: Vec<ScrapedData> = Vec::new();
     let mut seen_items = HashSet::new();
 
     for item in &data {
-        // Create a unique identifier for this data item
         let mut identifier = item.selector_name.clone();
         for value in &item.values {
             identifier.push_str(value);
         }
 
-        // Check if we've seen this item before
         if !seen_items.contains(&identifier) {
             seen_items.insert(identifier);
-            // Clone the item since we only have a reference
             result.push(ScrapedData {
                 selector_name: item.selector_name.clone(),
                 values: item.values.clone(),
@@ -311,4 +262,14 @@ fn deduplicate_data(data: Vec<ScrapedData>) -> Vec<ScrapedData> {
 
     println!("Removed {} duplicate entries", data.len() - result.len());
     result
+}
+
+fn merge_scraped_data(base: &mut Vec<ScrapedData>, new: Vec<ScrapedData>) {
+    for new_item in new {
+        if let Some(existing) = base.iter_mut().find(|b| b.selector_name == new_item.selector_name) {
+            existing.values.extend(new_item.values);
+        } else {
+            base.push(new_item);
+        }
+    }
 }
